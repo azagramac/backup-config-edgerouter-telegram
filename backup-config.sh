@@ -1,8 +1,10 @@
 #!/bin/vbash
 source /opt/vyatta/etc/functions/script-template
 
-eval $(grep -v '^[[:space:]]*#' /config/auth/telegram.env | xargs)
+unset TOKEN CHAT_ID bot_token api_sendDocument ddns_block ip_address host_name ddns_status
+unset hostname uptime_info wg_status wg_active wg_peers timestamp backup_dir backup_file filename caption
 
+eval $(grep -v '^[[:space:]]*#' /config/auth/telegram.env | xargs)
 bot_token="${TOKEN}"
 chat_id="${CHAT_ID}"
 api_sendDocument="https://api.telegram.org/bot${bot_token}/sendDocument"
@@ -10,7 +12,6 @@ api_sendDocument="https://api.telegram.org/bot${bot_token}/sendDocument"
 trim() { echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
 ddns_block=$(run show dns dynamic status 2>/dev/null || true)
-
 ip_address=$(printf "%s\n" "$ddns_block" | awk -F: '/ip address/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
 host_name=$(printf "%s\n" "$ddns_block" | awk -F: '/host-name/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
 ddns_status=$(printf "%s\n" "$ddns_block" | awk -F: '/update-status/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
@@ -26,11 +27,10 @@ uptime_info=$(run show system uptime 2>/dev/null | sed -n 's/.*up[[:space:]]\(.*
 [ -z "$uptime_info" ] && uptime_info=$(uptime -p 2>/dev/null || echo "unknown")
 
 if command -v wg >/dev/null 2>&1; then
-  wg_status=$(wg show all 2>/dev/null || true)
-  wg_active=$(printf "%s\n" "$wg_status" | awk '/interface:/ {print $2}' | tr '\n' ',' | sed 's/,$//')
-  wg_peers=$(printf "%s\n" "$wg_status" | grep -c 'latest handshake' || true)
+  wg_status=$(sudo wg show all 2>/dev/null || true)
+  wg_active=$(printf "%s\n" "$wg_status" | awk '/^interface:/ {iface=$2} END {print iface}')
   [ -z "$wg_active" ] && wg_active="None"
-  [ -z "$wg_peers" ] && wg_peers=0
+  wg_peers=$(printf "%s\n" "$wg_status" | awk '/^peer:/ {p=$2} /latest handshake/ && $3!="0" {count++} END {if(count=="") count=0; print count}')
 else
   wg_active="Not installed"
   wg_peers=0
