@@ -57,6 +57,11 @@ set system task-scheduler task backup-conf interval {interval}
 commit ;save
 ```
 
+####
+```bash
+0 22 * * 5 /bin/sh /config/scripts/backup-config.sh >> /home/ubnt/backup.log 2>&1
+```
+
 `{interval}`
  - none - Execution interval in minutes 
  - m - Execution interval in minutes 
