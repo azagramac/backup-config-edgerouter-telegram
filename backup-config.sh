@@ -1,56 +1,64 @@
-#!/bin/bash
+#!/bin/vbash
+source /opt/vyatta/etc/functions/script-template
 
-unset file_backup
+eval $(grep -v '^[[:space:]]*#' /config/auth/telegram.env | xargs)
 
-host=$(hostname)
-folder_backup="/config"
-file_backup="config_backup_$(date +%d%m%Y_%H%M).tar.gz"
+bot_token="${TOKEN}"
+chat_id="${CHAT_ID}"
+api_sendDocument="https://api.telegram.org/bot${bot_token}/sendDocument"
 
-server_user={USER_SERVER}
-server_backup={IP_SERVER}
-server_folder=/home/$server_user/ubiquiti/$host
+trim() { echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
-telegram_auth="/config/ssh-keys/telegram.env"
-token=$(cat $telegram_auth | grep "TOKEN" | awk -F "=" '{print $2}')
-chatid=$(cat $telegram_auth | grep "CHAT_ID" | awk -F "=" '{print $2}')
-api_sendMessage="https://api.telegram.org/bot$token/sendMessage?parse_mode=HTML"
-api_sendDocument="https://api.telegram.org/bot$token/sendDocument"
+ddns_block=$(run show dns dynamic status 2>/dev/null || true)
 
-if [ -d "$server_folder" ]; then
-    ssh $server_user@$server_backup ls -l $server_folder > /dev/null 2>&1
+ip_address=$(printf "%s\n" "$ddns_block" | awk -F: '/ip address/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+host_name=$(printf "%s\n" "$ddns_block" | awk -F: '/host-name/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+ddns_status=$(printf "%s\n" "$ddns_block" | awk -F: '/update-status/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+
+[ -z "$ip_address" ] && ip_address="unknown"
+[ -z "$host_name" ] && host_name="unknown"
+[ -z "$ddns_status" ] && ddns_status="unknown"
+
+hostname=$(run show system 2>/dev/null | awk -F: '/Hostname/ {print $2; exit}' | sed 's/^[ \t]*//;s/[ \t]*$//')
+[ -z "$hostname" ] && hostname=$(hostname 2>/dev/null || echo "unknown")
+
+uptime_info=$(run show system uptime 2>/dev/null | sed -n 's/.*up[[:space:]]\(.*\),[[:space:]][0-9]* user.*/\1/p')
+[ -z "$uptime_info" ] && uptime_info=$(uptime -p 2>/dev/null || echo "unknown")
+
+if command -v wg >/dev/null 2>&1; then
+  wg_status=$(wg show all 2>/dev/null || true)
+  wg_active=$(printf "%s\n" "$wg_status" | awk '/interface:/ {print $2}' | tr '\n' ',' | sed 's/,$//')
+  wg_peers=$(printf "%s\n" "$wg_status" | grep -c 'latest handshake' || true)
+  [ -z "$wg_active" ] && wg_active="None"
+  [ -z "$wg_peers" ] && wg_peers=0
 else
-    ssh $server_user@$server_backup mkdir -p "$server_folder"
+  wg_active="Not installed"
+  wg_peers=0
 fi
 
-cd /tmp || exit
-tar -czvf $file_backup $folder_backup > /dev/null 2>&1
-check_md5_local=$(md5sum /tmp/$file_backup | awk '{print $1}')
+timestamp=$(date +%d%m%Y_%H%M)
+backup_dir="/tmp/backup_${timestamp}"
+mkdir -p "$backup_dir"
+cp -r /config "$backup_dir/" 2>/dev/null || true
+[ -d /home/ubnt/wireguard ] && cp -r /home/ubnt/wireguard "$backup_dir/" 2>/dev/null || true
+backup_file="/tmp/backup_${timestamp}.tar.gz"
+tar -C "$backup_dir" -czf "$backup_file" . >/dev/null 2>&1 || tar -czf "$backup_file" -C "$backup_dir" . >/dev/null 2>&1
+rm -rf "$backup_dir"
+filename=$(basename "$backup_file")
 
-scp $file_backup $server_user@$server_backup:$server_folder/
-check_md5_server=$(ssh $server_user@$server_backup md5sum $server_folder/$file_backup | awk '{print $1}')
-verifyfile=$(ssh $server_user@$server_backup ls -l1t $server_folder | awk '{print $1, $9}' | head -2 | tail -1)
+caption="🖥️ <b>Hostname:</b> <code>$(trim "$hostname")</code>
+🌐 <b>Public IP:</b> <code>$(trim "$ip_address")</code>
+🏠 <b>DDNS Host:</b> <code>$(trim "$host_name")</code>
+✅ <b>DDNS Status:</b> <b>$(trim "$ddns_status")</b>
+⏱️ <b>Uptime:</b> <code>$(trim "$uptime_info")</code>
+🛡️ <b>WireGuard:</b> <b>$(trim "$wg_active")</b> ($(trim "$wg_peers") peers)
+📅 <b>Timestamp:</b> <code>${timestamp}</code>
+💾 <b>File:</b> <code>${filename}</code>"
 
-function _sendMessage() {
-    curl -s -X POST $api_sendMessage -d chat_id=$chatid -d text="$1"
-}
+curl -s -X POST "${api_sendDocument}" \
+  -F chat_id="${chat_id}" \
+  -F document=@"${backup_file}" \
+  -F caption="${caption}" \
+  -F parse_mode=HTML >/dev/null 2>&1
 
-function _sendDocument() {
-    curl -s -X POST $api_sendDocument -F chat_id=$chatid -F document=@"$1"
-}
-
-if [ "$check_md5_local" == "$check_md5_server" ]; then
-    hashmd5="$check_md5_local"
-else
-    hashmd5="File $file_backup, hash MD5: $check_md5_server, md5 should be $check_md5_local"
-fi
-
-if [ "$check_md5_local" == "$check_md5_server" ]; then
-        _sendMessage "$(printf "✅ <b>Backup successfully created</b>\n\nHostname: $host\nMD5: <code>$hashmd5</code>\nFile:\n <code>$verifyfile</code>")" && _sendDocument "$file_backup" > /dev/null 2>&1
-        exit 0
-else
-        _sendMessage "$(printf "❌ <b>Backup failed, error MD5</b>\n\nHostname: $host\nError MD5: <code>$hashmd5</code>")" > /dev/null 2>&1
-        exit 1
-fi
-
-rm -rf /tmp/$file_backup
 exit 0
